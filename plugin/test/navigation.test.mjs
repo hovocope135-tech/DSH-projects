@@ -1,8 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import { ProjectStore } from '../lib/store.js'
 import { Actions } from '../lib/actions.js'
 import { snapshot } from '../lib/http.js'
@@ -83,4 +84,113 @@ test('follow-up tasks keep a durable source link without reopening or modifying 
   assert.equal(snapshotThread.relatedThreadId, old.threadId)
   assert.equal(replay.get(projectId).threads.get(old.threadId).state, 'done')
   assert.equal(replay.get(projectId).threads.get(old.threadId).resolved, true)
+})
+
+test('left sidebar switches in one click between projects and native DSH workspaces, remembering the choice across panels and reloads', () => {
+  const storage = new Map([['mira-projects:welcomed', '1']])
+  const fakeWindow = {
+    location: { hash: '', pathname: '/', search: '' },
+    history: { state: {}, pushState(_s, _t, url) { fakeWindow.location.hash = String(url).includes('#') ? String(url).slice(String(url).indexOf('#')) : '' }, replaceState() {} },
+    localStorage: { getItem: k => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, String(v)) },
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+    setTimeout: () => 1, clearTimeout() {},
+  }
+  const fakeReact = {
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat() }),
+    Fragment: 'Fragment',
+    useState: init => [typeof init === 'function' ? init() : init, () => {}],
+    useEffect() {}, useLayoutEffect() {}, useRef: v => ({ current: v }), useMemo: fn => fn(),
+    useCallback: fn => fn, useSyncExternalStore: (_sub, get) => get(),
+  }
+  let client
+  fakeWindow.__ModuleLoader__ = { load(def) { client = def.factory(id => id === 'react' ? fakeReact : {}) } }
+  runInNewContext(readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'), {
+    window: fakeWindow,
+    document: { baseURI: 'http://localhost/', head: { appendChild() {} }, createElement: () => ({ setAttribute() {}, remove() {} }), addEventListener() {}, removeEventListener() {} },
+    CustomEvent: class { constructor(type) { this.type = type } },
+    URLSearchParams, URL,
+    fetch: () => new Promise(() => {}),
+  })
+
+  const mount = () => {
+    const cleanups = [], registered = new Map(), panelListeners = new Set()
+    let activePanelId = null
+    const ctx = {
+      effect(fn) { const off = fn(); if (typeof off === 'function') cleanups.push(off); return off },
+      locale: { register: () => () => {}, bind: () => k => k },
+      uiWorkspace: { openSession() {} },
+      sidebarRight: { mounted: { getSnapshot: () => undefined, subscribe: () => () => {} } },
+      sidebarRightTabs: { register: () => () => {} },
+      sessions: { list: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} } },
+      inputTriggers: { registerSource: () => () => {} },
+      uiConversation: { userText: { register: () => () => {} } },
+      layout: {
+        selectPanel(id) { activePanelId = id },
+        panelInfo: { getSnapshot: () => ({ activePanelId }), subscribe: fn => { panelListeners.add(fn); return () => panelListeners.delete(fn) } },
+      },
+      slots: {
+        inject: (_key, fn) => fn(),
+        register(opts, comp) {
+          const entry = { opts, comp }
+          const list = registered.get(opts.name) || []
+          list.push(entry); registered.set(opts.name, list)
+          return () => { const cur = registered.get(opts.name) || [], idx = cur.indexOf(entry); if (idx >= 0) cur.splice(idx, 1) }
+        },
+      },
+    }
+    client.apply(ctx)
+    return {
+      registered,
+      setPanel(id) { activePanelId = id; for (const fn of panelListeners) fn() },
+      unmount() { for (const off of cleanups.reverse()) off() },
+    }
+  }
+
+  const findButtons = node => {
+    if (!node || typeof node !== 'object') return []
+    const own = node.type === 'button' ? [node] : []
+    return own.concat((node.children || []).flatMap(findButtons))
+  }
+
+  const app = mount()
+  assert.equal((app.registered.get('sidebar.workspaces') || []).length, 1, 'starts with projects navigation mounted')
+  const footerComp = app.registered.get('sidebar.footer.action')?.[0]?.comp
+  assert.equal(typeof footerComp, 'function', 'registers persistent footer switch')
+
+  // WorkspaceProjects header itself also carries a one-click button to reveal native workspaces.
+  const navTree = app.registered.get('sidebar.workspaces')[0].comp({ wide: true })
+  const headerSwitch = findButtons(navTree).find(b => b.props['aria-label'] === '切换到原有工作区与对话')
+  assert.ok(headerSwitch, 'projects header offers direct switch to native workspaces')
+  headerSwitch.props.onClick()
+
+  assert.equal((app.registered.get('sidebar.workspaces') || []).length, 0, 'unregisters override so native DSH workspaces render')
+  assert.equal(storage.get('mira-projects:sidebar'), 'native', 'persists native preference')
+
+  // Opening Projects or Personal Assistant panel respects the user's explicit native sidebar choice.
+  app.setPanel('mira-projects')
+  assert.equal((app.registered.get('sidebar.workspaces') || []).length, 0, 'keeps native workspaces visible across panel switches')
+
+  // Reloading in a fresh mount restores native mode without flashing projects override.
+  app.unmount()
+  const reloaded = mount()
+  assert.equal((reloaded.registered.get('sidebar.workspaces') || []).length, 0, 'remembers native mode on reload')
+
+  // One click on the footer switch brings back the projects list, in both wide and collapsed rail modes.
+  const switchBtnWide = reloaded.registered.get('sidebar.footer.action')[0].comp({ wide: true })
+  assert.equal(switchBtnWide.props['aria-label'], '切回项目与最近任务')
+  switchBtnWide.props.onClick()
+  assert.equal((reloaded.registered.get('sidebar.workspaces') || []).length, 1, 'restores projects navigation in one click')
+  assert.equal(storage.get('mira-projects:sidebar'), 'projects')
+
+  const switchBtnRail = reloaded.registered.get('sidebar.footer.action')[0].comp({ wide: false })
+  assert.equal(switchBtnRail.props['aria-label'], '切换到原有工作区与对话')
+  let expanded = 0
+  const railTree = reloaded.registered.get('sidebar.workspaces')[0].comp({ wide: false, expandSidebar: () => { expanded++ } })
+  const railPlus = findButtons(railTree).find(b => b.props['aria-label'] === '新建项目')
+  assert.ok(railPlus, 'collapsed rail renders New Project button')
+  switchBtnRail.props.onClick() // switch to native while in rail
+  const backFromRail = reloaded.registered.get('sidebar.footer.action')[0].comp({ wide: false })
+  backFromRail.props.onClick() // switch back to projects in rail -> expands sidebar so projects list is visible
+  assert.equal(expanded, 1, 'switching back to projects from collapsed rail expands the sidebar')
+  reloaded.unmount()
 })

@@ -1858,7 +1858,25 @@ window.__ModuleLoader__.load({
 		// its own right-panel tabs, the goal strip above the composer, and cards for its tools inside the conversation.
 
 		/** Host services captured at apply time; null until the DSH shell provides them. */
-		const shell = { workspace: null, sidebar: null, sessions: null, showNav: null, showNative: null };
+		const shell = { workspace: null, sidebar: null, sessions: null, showNav: null, showNative: null, expandSidebar: null, showingNav: true, navListeners: new Set() };
+		function useShowingNav() {
+			const subscribe = useCallback(fn => { shell.navListeners.add(fn); return () => shell.navListeners.delete(fn); }, []);
+			const read = useCallback(() => shell.showingNav, []);
+			return useSyncExternalStore(subscribe, read, read);
+		}
+		function SidebarModeSwitch({ wide }) {
+			const showingNav = useShowingNav();
+			const label = showingNav ? "显示工作区" : "显示项目";
+			const title = showingNav ? "切换到原有工作区与对话" : "切回项目与最近任务";
+			const toggle = () => {
+				if (showingNav) shell.showNative?.();
+				else { shell.showNav?.(); if (!wide) shell.expandSidebar?.(); }
+			};
+			const btn = !wide
+				? h("button", { type: "button", className: "mp-sidebar-switch mp-sidebar-switch-rail", "aria-label": title, title: P.Tooltip ? undefined : title, onClick: toggle }, h(Icon, { name: showingNav ? "folder" : "tasks", size: 18 }))
+				: h("button", { type: "button", className: "mp-sidebar-switch", "aria-label": title, title, onClick: toggle }, h(Icon, { name: showingNav ? "folder" : "tasks", size: 16 }), h("span", null, label));
+			return !wide && P.Tooltip ? h(P.Tooltip, { label: title, side: "right", delayMs: 500, portal: true }, btn) : btn;
+		}
 		const TASK_TAB_ID = "mira-projects.task", TASK_TAB_KIND = "mira-projects-task";
 		const CHANGES_TAB_ID = "mira-projects.changes", CHANGES_TAB_KIND = "mira-projects-changes";
 		const AGENTS_TAB_ID = "mira-projects.agents", AGENTS_TAB_KIND = "mira-projects-agents";
@@ -2256,10 +2274,14 @@ window.__ModuleLoader__.load({
 
 		// ---------------------------------------------------------------- left column (every screen)
 
-		function WorkspaceProjects({ wide }) {
+		function WorkspaceProjects({ wide, expandSidebar }) {
 			// A sub-agent counts as the Session that sent it out, so the place it belongs to stays marked.
 			const snap = useSnapshot(), hash = useRoute(), onScreen = useOnScreenSession(), here = useRootSession(onScreen);
-			if (!wide) return h("div", { className: "mp-workspaces-rail" });
+			shell.expandSidebar = expandSidebar || null;
+			if (!wide) {
+				const railBtn = h("button", { type: "button", className: "mp-sidebar-switch mp-sidebar-switch-rail", "aria-label": "新建项目", title: P.Tooltip ? undefined : "新建项目", onClick: () => { expandSidebar?.(); window.dispatchEvent(new CustomEvent("mira-projects:create")); } }, h(Icon, { name: "plus", size: 18 }));
+				return h("div", { className: "mp-workspaces-rail" }, P.Tooltip ? h(P.Tooltip, { label: "新建项目", side: "right", delayMs: 500, portal: true }, railBtn) : railBtn);
+			}
 			const route = readRoute();
 			const projectRows = snap.projects.map(p => {
 				const threads = p.threads || [];
@@ -2279,7 +2301,7 @@ window.__ModuleLoader__.load({
 				.sort((a, b) => b.at - a.at).slice(0, 5);
 			void hash;
 			return h("nav", { className: "mp-workspaces", "aria-label": "个人助理与项目" },
-				h("div", { className: "mp-workspaces-head" }, h("span", null, "项目"), h("button", { type: "button", "aria-label": "新建项目", onClick: () => window.dispatchEvent(new CustomEvent("mira-projects:create")) }, "+")),
+				h("div", { className: "mp-workspaces-head" }, h("span", null, "项目"), h("span", { className: "mp-workspaces-acts" }, h("button", { type: "button", "aria-label": "切换到原有工作区与对话", title: "切换到原有工作区与对话", onClick: () => shell.showNative?.() }, h(Icon, { name: "folder", size: 16 })), h("button", { type: "button", "aria-label": "新建项目", title: "新建项目", onClick: () => window.dispatchEvent(new CustomEvent("mira-projects:create")) }, h(Icon, { name: "plus", size: 16 })))),
 				projectRows,
 				!snap.projects.length ? h("div", { className: "mp-workspace-empty" }, "还没有项目，点上面的 + 新建") : null,
 				recent.length ? h("div", { className: "mp-workspaces-head" }, h("span", null, "最近")) : null,
@@ -4819,23 +4841,31 @@ html[data-theme="dark"] :is(.mp-page,.mp-trace-dialog,.mp-observation-dialog,.mp
 .mp-nav-toggle span{display:none}
 .mp-nav-overlay>.mp-list{position:absolute;inset:0 auto 0 0;width:min(288px,calc(100% - 48px));z-index:12;box-shadow:var(--float)}
 .mp-nav-scrim{position:absolute;inset:0;border:0;background:rgba(0,0,0,.16);z-index:11;cursor:pointer}
-.mp-nav-toggle:focus-visible,.mp-workspaces button:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,var(--rx-blue-9));outline-offset:1px}
+.mp-nav-toggle:focus-visible,.mp-workspaces button:focus-visible,.mp-sidebar-switch:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,var(--rx-blue-9));outline-offset:1px}
 /* Scoped workspace browser uses DSH tokens, with no vertical divider or rail. */
-.mp-workspaces{padding:8px 12px;overflow:auto;min-height:0;flex:1;font-size:14px;color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family,inherit);line-height:24px}
+.mp-workspaces{padding:0;overflow:auto;min-height:0;flex:1;font-size:14px;color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family,inherit);line-height:24px}
+.mp-workspaces svg,.mp-sidebar-switch svg{stroke-width:1.6}
+.mp-workspaces-rail{display:flex;flex-direction:column;align-items:center}
 .mp-workspaces button{all:unset;box-sizing:border-box;cursor:pointer;border-radius:8px;display:flex;align-items:center;gap:8px;min-height:32px;min-width:0}
 .mp-workspaces button:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.mp-workspaces-head{display:flex;align-items:center;justify-content:space-between;color:var(--dsw-alias-label-tertiary);padding:4px 4px 12px}
-.mp-workspaces-head button{justify-content:center;width:28px;font-size:16px;line-height:24px}
+.mp-workspaces-head{display:flex;align-items:center;justify-content:space-between;height:36px;color:var(--dsw-alias-label-tertiary);padding:0 0 0 var(--dsh-sidebar-row-padding,12px)}
+.mp-workspaces-acts{display:inline-flex;align-items:center;gap:4px}
+.mp-workspaces-head button{justify-content:center;width:28px;height:28px;min-height:28px;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-tertiary))}
+.mp-workspaces-head button:hover{color:var(--dsw-alias-label-primary)}
+.mp-sidebar-switch{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;gap:var(--dsh-sidebar-label-gap,8px);width:100%;height:36px;padding:0 calc(var(--dsh-sidebar-row-padding,12px) - var(--dsh-sidebar-paint-inset,0px));border-inline:var(--dsh-sidebar-paint-inset,0px) solid transparent;border-radius:12px;background-clip:padding-box;color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family,inherit);font-size:14px;line-height:24px}
+.mp-sidebar-switch:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.mp-sidebar-switch>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mp-sidebar-switch-rail{width:36px;height:36px;min-height:36px;padding:0;border-inline:0;justify-content:center;color:var(--dsw-alias-label-primary)}
 .mp-workspace-row{display:flex;align-items:center;gap:4px}
 .mp-workspaces .mp-workspace-disclosure{justify-content:center;width:18px;flex:none;color:var(--dsw-alias-label-tertiary)}
 .mp-workspace-disclosure[aria-expanded="true"] svg{transform:rotate(90deg)}
-.mp-workspaces .mp-workspace-project{flex:1;padding:4px 8px}
-.mp-workspaces .mp-workspace-thread{width:100%;padding:4px 8px}
+.mp-workspaces .mp-workspace-project{flex:1;padding:4px calc(var(--dsh-sidebar-row-padding,12px) - var(--dsh-sidebar-paint-inset,0px));border-inline:var(--dsh-sidebar-paint-inset,0px) solid transparent;background-clip:padding-box}
+.mp-workspaces .mp-workspace-thread{width:100%;padding:4px calc(var(--dsh-sidebar-row-padding,12px) - var(--dsh-sidebar-paint-inset,0px));border-inline:var(--dsh-sidebar-paint-inset,0px) solid transparent;background-clip:padding-box}
 .mp-workspace-project>span,.mp-workspace-thread>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mp-workspace-threads{padding-left:24px;margin:4px 0 8px}
 .mp-workspaces .mp-workspace-selected{background:var(--dsw-alias-interactive-bg-active);font-weight:500}
 .mp-workspaces .mp-workspace-within{background:var(--dsw-alias-interactive-bg-hover);font-weight:500}
-.mp-workspace-empty{padding:8px 8px;font-size:14px;color:var(--dsw-alias-label-tertiary);line-height:24px}
+.mp-workspace-empty{padding:8px var(--dsh-sidebar-row-padding,12px);font-size:14px;color:var(--dsw-alias-label-tertiary);line-height:24px}
 .mp-workspace-group-label,.mp-workspace-archive>summary{padding:8px 8px 4px;font-size:14px;line-height:24px;color:var(--dsw-alias-label-tertiary)}.mp-workspace-archive>summary{cursor:pointer}
 .mp-workspace-dot{width:6px;height:6px;background:var(--dsw-alias-label-caption,var(--rx-gray-9));border-radius:50%;flex:none}
 .mp-workspace-working{background:var(--dsw-alias-state-business-primary,var(--rx-blue-9))}
@@ -4844,12 +4874,12 @@ html[data-theme="dark"] :is(.mp-page,.mp-trace-dialog,.mp-observation-dialog,.mp
 .mp-workspaces .mp-workspace-project>span{flex:1}
 .mp-workspace-meta{flex:none;font-size:14px;color:var(--dsw-alias-label-tertiary);line-height:24px}
 .mp-workspace-meta-wait{color:var(--rx-yellow-11)}
-.mp-workspaces .mp-workspace-recent{align-items:flex-start;padding:8px 8px}
+.mp-workspaces .mp-workspace-recent{align-items:flex-start;padding:8px calc(var(--dsh-sidebar-row-padding,12px) - var(--dsh-sidebar-paint-inset,0px))}
 .mp-workspace-recent .mp-workspace-dot{margin-top:8px}
 .mp-workspace-recent>span{display:flex;flex-direction:column;min-width:0}
 .mp-workspace-recent-title,.mp-workspace-recent-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mp-workspace-recent-meta{font-size:14px;line-height:24px;color:var(--dsw-alias-label-tertiary)}
-.mp-workspaces .mp-workspaces-head:not(:first-of-type){padding-top:16px}
+.mp-workspaces .mp-workspaces-head:not(:first-of-type){margin-top:12px}
 .mp-task-tab{padding:16px;display:flex;flex-direction:column;gap:16px;font-size:14px;line-height:24px;color:var(--dsw-alias-label-primary);overflow:auto;height:100%;box-sizing:border-box}
 .mp-task-tab-head{display:flex;align-items:center;gap:8px;font-size:14px;line-height:24px}
 .mp-task-tab-title{margin:0;font-size:14px;line-height:24px;font-weight:600}
@@ -5765,11 +5795,23 @@ div:has(> [data-slot="sidebar.right.tab.guide.entry"] [data-mira-guide-skip]){di
 			// The left column answers "where": projects and the latest few things. DSH's own list is one click away.
 			ctx.effect(() => ctx.slots.inject("sidebar.workspaces", () => {
 				let dispose = null;
-				shell.showNav = () => { if (!dispose) dispose = ctx.slots.register({ name: "sidebar.workspaces", priority: -10 }, WorkspaceProjects); };
-				shell.showNative = () => { dispose?.(); dispose = null; };
-				shell.showNav();
-				return () => { shell.showNative(); shell.showNav = null; shell.showNative = null; };
+				const notify = () => { for (const fn of shell.navListeners) fn(); };
+				shell.showNav = (persist = true) => {
+					if (!dispose) dispose = ctx.slots.register({ name: "sidebar.workspaces", priority: -10 }, WorkspaceProjects);
+					if (persist) writePref("sidebar", "projects");
+					if (!shell.showingNav) { shell.showingNav = true; notify(); }
+				};
+				shell.showNative = (persist = true) => {
+					dispose?.(); dispose = null;
+					if (persist) writePref("sidebar", "native");
+					if (shell.showingNav) { shell.showingNav = false; notify(); }
+				};
+				if (readPref("sidebar") === "native") shell.showNative(false); else shell.showNav(false);
+				const onStorage = e => { if (e.key === "mira-projects:sidebar") { if (e.newValue === "native") shell.showNative(false); else shell.showNav(false); } };
+				window.addEventListener("storage", onStorage);
+				return () => { window.removeEventListener("storage", onStorage); shell.showNative(false); shell.showNav = null; shell.showNative = null; shell.expandSidebar = null; };
 			}), "mira-projects: left column");
+			ctx.effect(() => ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({ name: "sidebar.footer.action", id: "mira-projects.sidebar-mode", order: 10 }, SidebarModeSwitch)), "mira-projects: sidebar mode switch");
 
 			ctx.effect(() => ctx.slots.inject("main", () => {
 				const dispose = ctx.slots.register({ name: "main", key: PANEL_ID, locale: NS }, ProjectsPage);
@@ -5790,7 +5832,7 @@ div:has(> [data-slot="sidebar.right.tab.guide.entry"] [data-mira-guide-skip]){di
 				window.addEventListener("popstate", restore); window.addEventListener("hashchange", restore);window.addEventListener("mira-projects:navigate", restore);window.addEventListener("mira-personal:navigate", restore);window.addEventListener("mira-projects:create", create);
 				const off = ctx.layout.panelInfo.subscribe(() => {
 					const active = ctx.layout.panelInfo.getSnapshot().activePanelId;
-					if (active === HOME_ID || active === PANEL_ID) shell.showNav?.();
+					if ((active === HOME_ID || active === PANEL_ID) && readPref("sidebar") !== "native") shell.showNav?.(false);
 					if (active === HOME_ID && (!isHomeRoute() || homeIsFallbackOnly())) { openMira();return; }
 					// 「项目」 opens the index of every project.
 					if (active === PANEL_ID && !readRoute() && !isIndexRoute() && window.location.hash !== "#mira-projects-new") { navigateIndex();return; }
